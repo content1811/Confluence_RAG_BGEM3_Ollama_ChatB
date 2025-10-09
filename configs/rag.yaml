@@ -1,0 +1,46 @@
+paths:
+  scrape_root: "/Users/prabhatkumar.singh/Downloads/conftest/confluence_export_CKB_V2/CKB/RMI Cloud Platform - Platform"  # Update this path
+  sqlite_path: "data/rag.db"
+  chroma_dir: "data/chroma"
+
+embeddings:
+  model: "BAAI/bge-m3"
+  dim: 1024
+  batch_size: 64
+  device: "auto"
+
+chunking:
+  max_tokens: 900
+  overlap_tokens: 80
+  prefer_structure: true
+
+retrieval:
+  k_vec: 50
+  k_fts: 50
+  fusion: "rrf"
+  weights:
+    semantic: 0.6
+    keyword: 0.4
+
+rerank:
+  enabled: true
+  model: "BAAI/bge-reranker-base"
+  top_n: 10
+
+abstain:
+  min_rerank_score: 0.25
+  min_chunks: 2
+
+llm:
+  model: "deepseek-r1:7b"  # Ollama model
+  base_url: "http://localhost:11434"
+  temperature: 0.1
+  max_tokens: 2000
+
+redaction:
+  enabled: true
+  patterns:
+    - 'api[_-]?key'
+    - 'password'
+    - 'secret'
+    - 'token'
