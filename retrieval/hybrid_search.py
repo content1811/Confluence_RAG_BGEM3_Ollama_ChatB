@@ -24,9 +24,17 @@ class HybridSearch:
         # Convert distances to similarity scores (cosine similarity)
         vec_scores = {cid: 1 - dist for cid, dist in zip(vec_chunk_ids, vec_distances)}
         
-        # Keyword search (FTS)
-        fts_results = self.db.fts_search(query, limit=self.config.retrieval.k_fts)
-        fts_scores = self._normalize_bm25_scores(fts_results)
+        # Keyword search (FTS) - handle errors gracefully
+        try:
+            fts_results = self.db.fts_search(query, limit=self.config.retrieval.k_fts)
+            fts_scores = self._normalize_bm25_scores(fts_results)
+        except Exception as e:
+            print(f"Warning: FTS search failed ({e}), using semantic search only")
+            fts_scores = {}
+        
+        # If FTS failed, return semantic results only
+        if not fts_scores:
+            return sorted(vec_scores.items(), key=lambda x: x[1], reverse=True)
         
         # Fusion
         if self.config.retrieval.fusion == "rrf":

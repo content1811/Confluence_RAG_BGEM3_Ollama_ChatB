@@ -1,5 +1,5 @@
 paths:
-  scrape_root: "/Users/prabhatkumar.singh/Downloads/conftest/confluence_export_CKB_V2/CKB/RMI Cloud Platform - Platform"  # Update this path
+  scrape_root: "/Users/prabhatkumar.singh/Downloads/conftest/confluence_export_CKB_V2/CKB/RMI Cloud Platform - Platform"
   sqlite_path: "data/rag.db"
   chroma_dir: "data/chroma"
 
@@ -32,10 +32,10 @@ abstain:
   min_chunks: 2
 
 llm:
-  model: "deepseek-r1:7b"  # Ollama model
+  model: "deepseek-r1:7b"
   base_url: "http://localhost:11434"
-  temperature: 0.1
-  max_tokens: 2000
+  temperature: 0.3
+  max_tokens: 1500
 
 redaction:
   enabled: true
@@ -44,3 +44,5 @@ redaction:
     - 'password'
     - 'secret'
     - 'token'
+    - 'bearer'
+    - 'jwt'
