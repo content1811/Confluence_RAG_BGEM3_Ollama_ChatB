@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # ← ADD THIS
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 import sys
@@ -18,10 +19,21 @@ from pipeline.query_pipeline import QueryPipeline
 
 app = FastAPI(title="Confluence RAG API", version="1.0.0")
 
+# ← ADD THIS CORS MIDDLEWARE
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Global state
 config = None
 pipeline = None
-# Simple dict to store session histories
 sessions = {}
 
 class QueryRequest(BaseModel):
@@ -90,23 +102,18 @@ async def query_endpoint(request: QueryRequest):
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     
-    # Create session if not provided
     session_id = request.session_id
     if not session_id or session_id not in sessions:
         session_id = str(uuid.uuid4())
         sessions[session_id] = []
     
-    # Get history for this session
     history = sessions[session_id]
     
-    # Query with history
     result = pipeline.query(request.question, history=history)
     
-    # Update history
     history.append({"role": "user", "content": request.question})
     history.append({"role": "assistant", "content": result['answer']})
     
-    # Keep only last 20 messages (10 turns)
     if len(history) > 20:
         sessions[session_id] = history[-20:]
     else:
