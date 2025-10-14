@@ -1,236 +1,238 @@
-from typing import Dict, List, Optional
+from typing import Dict, List
 import re
+from security.redaction import compile_patterns, scrub
 
 class QueryPipeline:
-    """Complete RAG query pipeline with simple conversation memory"""
-    
     def __init__(self, db, hybrid_search, reranker, llm_client, config):
         self.db = db
         self.hybrid_search = hybrid_search
         self.reranker = reranker
         self.llm_client = llm_client
         self.config = config
-        self.redaction_patterns = self._compile_redaction_patterns()
+        self.redaction_patterns = compile_patterns()
     
     def query(self, question: str, history: List[Dict] = None) -> Dict:
-        """
-        Execute complete RAG pipeline with conversation context
-        
-        Args:
-            question: Current user question
-            history: List of previous turns in format [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
-        """
         if history is None:
             history = []
         
-        # Expand query with conversation context if this is a follow-up
-        expanded_query = self._expand_query_with_history(question, history)
-        
-        # Step 1: Hybrid retrieval
-        results = self.hybrid_search.search(expanded_query)
-        
-        if not results:
-            return self._request_clarification(question, history)
-        
-        # Step 2: Fetch chunk details
-        top_k = min(50, len(results))
-        chunks = self._fetch_chunks([cid for cid, _ in results[:top_k]])
-        
-        if not chunks:
-            return self._request_clarification(question, history)
-        
-        # Step 3: Rerank if enabled
-        if self.reranker:
-            reranked = self.reranker.rerank(
-                expanded_query, 
-                chunks, 
-                self.config.rerank.top_n
-            )
+        try:
+            # Summarize long history
+            if len(history) > 10:
+                history = self._summarize_history(history)
             
-            if not reranked:
-                return self._request_clarification(question, history)
+            # Rewrite query for follow-ups
+            expanded_query = self._rewrite_query(question, history)
             
-            top_score = reranked[0][1]
+            # Hybrid retrieval
+            results = self.hybrid_search.search(expanded_query)
             
-            # Lower threshold for follow-up questions
-            threshold = self.config.abstain.min_rerank_score
-            if history and self._is_followup_question(question):
-                threshold *= 0.7  # Be more lenient
+            # Check if results is empty (handle list properly)
+            if not results or len(results) == 0:
+                return self._handle_no_results(question, history)
             
-            if top_score < threshold:
-                return self._request_clarification(question, history)
+            # Fetch chunks
+            top_k = min(40, len(results))
+            chunks = self._fetch_chunks([cid for cid, _ in results[:top_k]])
             
-            if len(reranked) < self.config.abstain.min_chunks:
-                return self._request_clarification(question, history)
+            # Check if chunks is empty
+            if not chunks or len(chunks) == 0:
+                return self._handle_no_results(question, history)
             
-            final_chunks = [chunk for chunk, _ in reranked]
-        else:
-            final_chunks = chunks[:self.config.rerank.top_n]
-        
-        # Step 4: Generate answer with conversation history
-        return self._generate_answer(question, final_chunks, history)
+            # Pre-scrub chunks
+            for chunk in chunks:
+                chunk['text'] = scrub(chunk['text'], self.redaction_patterns)
+            
+            # Rerank
+            if self.reranker:
+                reranked = self.reranker.rerank(expanded_query, chunks, self.config.rerank.top_n)
+                
+                # Check if reranked is empty
+                if not reranked or len(reranked) == 0:
+                    return self._handle_no_results(question, history)
+                
+                top_score = reranked[0][1]
+                final_chunks = [chunk for chunk, _ in reranked]
+                
+                # Answerability check
+                if not self._can_answer(question, final_chunks, top_score):
+                    # If no good docs found, use GENERAL mode to allow LLM to respond naturally
+                    return self._generate_answer_with_mode(question, [], history, "GENERAL")
+                
+                return self._generate_answer_with_mode(question, final_chunks, history, "DOC-GROUNDED")
+            else:
+                final_chunks = chunks[:self.config.rerank.top_n]
+                return self._generate_answer_with_mode(question, final_chunks, history, "DOC-GROUNDED")
+                
+        except Exception as e:
+            print(f"❌ Pipeline error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "answer": "An error occurred while processing your question. Please try again.",
+                "citations": [],
+                "confidence": "low",
+                "chunks_used": 0,
+                "mode": "GENERAL"
+            }
     
-    def _expand_query_with_history(self, question: str, history: List[Dict]) -> str:
-        """Expand query using conversation history"""
-        if not history:
+    def _rewrite_query(self, question: str, history: List[Dict]) -> str:
+        if not history or not self._is_followup_question(question):
             return question
         
-        # Get last user question
-        last_user_msg = None
-        for msg in reversed(history):
-            if msg.get("role") == "user":
-                last_user_msg = msg.get("content", "")
-                break
+        prompt = "Rewrite the user's latest question into a standalone query.\n\nPrevious turns:\n"
+        last_n = history[-6:]
+        for m in last_n:
+            role = m["role"]
+            content = m["content"][:200]
+            prompt += f"{role.title()}: {content}\n"
+        prompt += f"\nUser: {question}\nStandalone query:"
         
-        if not last_user_msg:
+        try:
+            resp = self.llm_client.generate(
+                system="You rewrite queries into standalone form.",
+                user=prompt,
+                context="",
+                history=""
+            )
+            rewritten = (resp.get("response") or "").strip()
+            return rewritten if rewritten else question
+        except Exception as e:
+            print(f"Warning: Query rewrite failed ({e}), using original question")
             return question
+    
+    def _summarize_history(self, history: List[Dict]) -> List[Dict]:
+        if len(history) < 10:
+            return history
         
-        # If current question is a follow-up, combine with previous context
-        if self._is_followup_question(question):
-            return f"{last_user_msg} {question}"
+        sample = history[-8:]
+        text = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in sample)
+        prompt = "Summarize this dialogue into bullet points with key entities and current goal."
         
-        return question
+        try:
+            resp = self.llm_client.generate(
+                system="You summarize crisply.",
+                user=prompt,
+                context=text,
+                history=""
+            )
+            memo = resp.get("response", "").strip()
+            if memo:
+                return history[:-8] + [{"role": "assistant", "content": f"[MEMO]\n{memo}"}]
+            else:
+                print("Warning: History summarization returned empty, keeping original")
+                return history
+        except Exception as e:
+            print(f"Warning: History summarization failed ({e}), keeping original")
+            return history
+    
+    def _can_answer(self, question: str, chunks: List[Dict], top_score: float) -> bool:
+        """
+        Determine if the retrieved chunks can answer the question
+        Very lenient - prefer using docs when available
+        """
+        try:
+            # Basic threshold check
+            if top_score < self.config.abstain.min_rerank_score:
+                return False
+            if len(chunks) < self.config.abstain.min_chunks:
+                return False
+            
+            # If we have ANY decent chunks (>0.3), use them
+            # The reranker already filtered for relevance
+            return True
+            
+        except Exception as e:
+            print(f"Warning: Answerability check failed ({e}), defaulting to True")
+            return True
     
     def _is_followup_question(self, question: str) -> bool:
-        """Check if question is a follow-up or refers to previous context"""
         followup_indicators = [
-            # Pronouns and references
             r'\b(it|this|that|these|those|its|their|them)\b',
             r'\b(last|previous|earlier|above|before)\b',
-            
-            # Question patterns that need context
             r'^(what|how|why|when|where|who)\s+(about|was|is|are)\b',
             r'^(tell me|explain|describe)\s+more\b',
             r'^(and|also|additionally)\b',
-            
-            # Meta questions about conversation
-            r'\b(my|our)\s+(question|query|last)\b',
-            r'what (did|was) (i|we)',
         ]
-        
         question_lower = question.lower()
         return any(re.search(pattern, question_lower, re.IGNORECASE) for pattern in followup_indicators)
     
-    def _request_clarification(self, question: str, history: List[Dict]) -> Dict:
-        """Request clarification instead of immediately abstaining"""
+    def _generate_answer_with_mode(self, question: str, chunks: List[Dict], 
+                                   history: List[Dict], mode: str) -> Dict:
+        from llm.prompts import SYSTEM_PROMPT, build_user_prompt, format_context, format_citations
         
-        # Check if question is too vague
-        vague_patterns = [
-            r'^\s*(what|how|tell|explain|describe)\s*\??\s*$',
-            r'^\s*(price|pricing|cost|费用)\s*\??\s*$',
-            r'^\s*(it|this|that)\s*\??\s*$',
-        ]
-        
-        question_stripped = question.strip().lower()
-        is_vague = any(re.match(pattern, question_stripped, re.IGNORECASE) for pattern in vague_patterns)
-        
-        if is_vague:
-            # Get context hint from history
-            hint = ""
-            if history:
-                for msg in reversed(history):
-                    if msg.get("role") == "user":
-                        last_q = msg.get("content", "")[:50]
-                        hint = f" (related to your previous question about: '{last_q}...')"
-                        break
-            
-            return {
-                "answer": f"I need more details to help you. Could you please be more specific?{hint}",
-                "citations": [],
-                "confidence": "clarification_needed",
-                "chunks_used": 0
-            }
-        
-        return self._abstain_response("No relevant information found in documentation.")
-    
-    def _fetch_chunks(self, chunk_ids: List[int]) -> List[Dict]:
-        """Fetch chunk details with citations"""
-        chunks = []
-        for chunk_id in chunk_ids:
-            chunk = self.db.get_chunk(chunk_id)
-            if chunk:
-                citation = self.db.get_citation(chunk_id)
-                chunk['citation'] = citation
-                chunks.append(chunk)
-        return chunks
-    
-    def _generate_answer(self, question: str, chunks: List[Dict], 
-                        history: List[Dict]) -> Dict:
-        """Generate answer using LLM with conversation context"""
-        from llm.prompts import SYSTEM_PROMPT, format_context, format_citations
-        
-        context = format_context(chunks)
-        
-        # Format conversation history for LLM
+        context = format_context(chunks) if chunks else ""
         history_context = self._format_history_for_llm(history)
         
-        response = self.llm_client.generate(
-            system=SYSTEM_PROMPT,
-            user=question,
-            context=context,
-            history=history_context
-        )
+        user_prompt = build_user_prompt(question, context, mode, history_context)
         
-        if "error" in response:
+        try:
+            response = self.llm_client.generate(
+                system=SYSTEM_PROMPT,
+                user=user_prompt,
+                context="",
+                history=""
+            )
+            
+            if "error" in response:
+                return {
+                    "answer": "Error generating response. Please try again.",
+                    "citations": [],
+                    "confidence": "low",
+                    "chunks_used": 0,
+                    "mode": "GENERAL"
+                }
+            
+            answer_text = response.get("response", "").strip()
+            answer_text = scrub(answer_text, self.redaction_patterns)
+            
+            confidence = self._assess_confidence(answer_text, chunks, mode)
+            
             return {
-                "answer": "Error generating response. Please try again.",
+                "answer": answer_text,
+                "citations": format_citations(chunks) if chunks else [],
+                "confidence": confidence,
+                "chunks_used": len(chunks),
+                "mode": mode
+            }
+        except Exception as e:
+            print(f"Error generating answer: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "answer": "An error occurred while generating the response. Please try again.",
                 "citations": [],
                 "confidence": "low",
-                "error": response["error"]
+                "chunks_used": 0,
+                "mode": "GENERAL"
             }
-        
-        answer_text = response.get("response", "").strip()
-        
-        # Apply redaction
-        answer_text = self._redact_sensitive_info(answer_text)
-        
-        confidence = self._assess_confidence(answer_text, chunks)
-        
-        return {
-            "answer": answer_text,
-            "citations": format_citations(chunks),
-            "confidence": confidence,
-            "chunks_used": len(chunks)
-        }
     
     def _format_history_for_llm(self, history: List[Dict], last_n: int = 3) -> str:
-        """Format conversation history for LLM prompt"""
         if not history:
             return ""
         
-        # Get last N turns (pair of user + assistant)
-        recent_history = history[-last_n*2:] if len(history) > last_n*2 else history
-        
+        recent_history = history[-last_n*2:]
         if not recent_history:
             return ""
         
-        formatted = ["Previous conversation:"]
+        formatted = []
         for msg in recent_history:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role == "user":
-                formatted.append(f"\nUser: {content}")
+                formatted.append(f"User: {content}")
             elif role == "assistant":
-                # Truncate long assistant responses
                 content_short = content[:200] + "..." if len(content) > 200 else content
                 formatted.append(f"Assistant: {content_short}")
         
         return "\n".join(formatted)
     
-    def _abstain_response(self, reason: str) -> Dict:
-        """Return abstain response"""
-        return {
-            "answer": "This information is not available in our documentation.",
-            "citations": [],
-            "confidence": "abstain",
-            "reason": reason
-        }
+    def _handle_no_results(self, question: str, history: List[Dict]) -> Dict:
+        # Always use GENERAL mode to let LLM respond naturally
+        return self._generate_answer_with_mode(question, [], history, "GENERAL")
     
-    def _assess_confidence(self, answer: str, chunks: List[Dict]) -> str:
-        """Assess answer confidence"""
-        if "not available" in answer.lower() or "cannot answer" in answer.lower():
-            return "low"
-        
+    def _assess_confidence(self, answer: str, chunks: List[Dict], mode: str) -> str:
+        if mode == "GENERAL":
+            return "general"
         if len(chunks) >= 5:
             return "high"
         elif len(chunks) >= 3:
@@ -238,22 +240,16 @@ class QueryPipeline:
         else:
             return "low"
     
-    def _compile_redaction_patterns(self) -> List[re.Pattern]:
-        """Compile regex patterns for sensitive information"""
-        patterns = [
-            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-            r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b',
-            r'\b\(\d{3}\)\s?\d{3}[-.]?\d{4}\b',
-            r'\b(?:\d{1,3}\.){3}\d{1,3}\b',
-            r'\b[A-Za-z0-9_-]{32,}\b',
-            r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b',
-            r'\b\d{3}-\d{2}-\d{4}\b',
-        ]
-        
-        return [re.compile(p) for p in patterns]
-    
-    def _redact_sensitive_info(self, text: str) -> str:
-        """Redact sensitive information from text"""
-        for pattern in self.redaction_patterns:
-            text = pattern.sub('[REDACTED]', text)
-        return text
+    def _fetch_chunks(self, chunk_ids: List[int]) -> List[Dict]:
+        chunks = []
+        for chunk_id in chunk_ids:
+            try:
+                chunk = self.db.get_chunk(chunk_id)
+                if chunk:
+                    citation = self.db.get_citation(chunk_id)
+                    chunk['citation'] = citation
+                    chunks.append(chunk)
+            except Exception as e:
+                print(f"Warning: Failed to fetch chunk {chunk_id}: {e}")
+                continue
+        return chunks

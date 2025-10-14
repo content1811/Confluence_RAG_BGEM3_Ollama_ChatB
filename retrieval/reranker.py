@@ -11,19 +11,28 @@ class Reranker:
         Rerank chunks using cross-encoder
         Returns: List of (chunk_dict, score) tuples
         """
-        if not chunks:
+        if not chunks or len(chunks) == 0:
             return []
         
-        # Prepare pairs
-        pairs = [(query, chunk['text']) for chunk in chunks]
-        
-        # Get reranking scores
-        scores = self.model.predict(pairs, show_progress_bar=False)
-        
-        # Combine chunks with scores
-        ranked = [(chunk, float(score)) for chunk, score in zip(chunks, scores)]
-        
-        # Sort by score descending and take top_n
-        ranked.sort(key=lambda x: x[1], reverse=True)
-        
-        return ranked[:top_n]
+        try:
+            # Prepare pairs
+            pairs = [(query, chunk.get('text', '')) for chunk in chunks]
+            
+            # Get reranking scores
+            scores = self.model.predict(pairs, show_progress_bar=False)
+            
+            # Combine chunks with scores
+            ranked = [(chunk, float(score)) for chunk, score in zip(chunks, scores)]
+            
+            # Sort by score descending and take top_n
+            ranked.sort(key=lambda x: x[1], reverse=True)
+            
+            return ranked[:top_n]
+            
+        except Exception as e:
+            print(f"❌ Reranking error: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return original chunks with default scores
+            return [(chunk, 0.5) for chunk in chunks[:top_n]]
+

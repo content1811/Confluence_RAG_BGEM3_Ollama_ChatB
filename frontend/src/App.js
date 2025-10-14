@@ -9,12 +9,13 @@ import {
   CheckCircle2,
   AlertTriangle,
   XCircle,
-  FileText
+  FileText,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import './App.css';
 
-// Configure axios
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 const api = axios.create({
   baseURL: API_URL,
@@ -29,12 +30,10 @@ function App() {
   const [error, setError] = useState(null);
   const messagesEndRef = useRef(null);
 
-  // Create session on mount
   useEffect(() => {
     createSession();
   }, []);
 
-  // Auto-scroll to bottom
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
@@ -75,19 +74,39 @@ function App() {
         session_id: sessionId
       });
 
+      const data = response.data;
+
       const assistantMessage = {
         role: 'assistant',
-        content: response.data.answer,
-        citations: response.data.citations || [],
-        confidence: response.data.confidence,
-        chunks_used: response.data.chunks_used,
+        content: data.answer || 'No response',
+        citations: data.citations || [],
+        confidence: data.confidence || 'low',
+        chunks_used: data.chunks_used || 0,
+        mode: data.mode || 'DOC-GROUNDED',
         timestamp: new Date().toISOString()
       };
 
       setMessages(prev => [...prev, assistantMessage]);
+      
+      // Update session ID if it changed
+      if (data.session_id && data.session_id !== sessionId) {
+        setSessionId(data.session_id);
+      }
+      
     } catch (err) {
-      setError('Failed to get response. Please try again.');
       console.error('Query error:', err);
+      
+      let errorMsg = 'Failed to get response. Please try again.';
+      
+      if (err.response) {
+        // Server responded with error
+        errorMsg = err.response.data?.detail || errorMsg;
+      } else if (err.request) {
+        // Request made but no response
+        errorMsg = 'Cannot reach server. Please check if the backend is running.';
+      }
+      
+      setError(errorMsg);
       
       const errorMessage = {
         role: 'assistant',
@@ -124,6 +143,10 @@ function App() {
         return <AlertTriangle className="confidence-icon medium" />;
       case 'low':
         return <XCircle className="confidence-icon low" />;
+      case 'general':
+        return <BookOpen className="confidence-icon general" />;
+      case 'abstain':
+        return <AlertCircle className="confidence-icon abstain" />;
       default:
         return <AlertCircle className="confidence-icon" />;
     }
@@ -132,7 +155,6 @@ function App() {
   return (
     <div className="app">
       <div className="chat-container">
-        {/* Header */}
         <header className="chat-header">
           <div className="header-content">
             <div className="header-title">
@@ -153,7 +175,6 @@ function App() {
           </div>
         </header>
 
-        {/* Error Banner */}
         {error && (
           <div className="error-banner">
             <AlertCircle size={16} />
@@ -162,7 +183,6 @@ function App() {
           </div>
         )}
 
-        {/* Messages */}
         <div className="messages-container">
           {messages.length === 0 ? (
             <div className="welcome-message">
@@ -201,7 +221,6 @@ function App() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input */}
         <form className="input-container" onSubmit={sendMessage}>
           <input
             type="text"
@@ -224,7 +243,6 @@ function App() {
           </button>
         </form>
 
-        {/* Footer */}
         <footer className="chat-footer">
           🔒 Internal Use Only | All conversations are logged
         </footer>
@@ -236,6 +254,15 @@ function App() {
 function Message({ message, getConfidenceIcon }) {
   const [showCitations, setShowCitations] = useState(false);
 
+  const getModeLabel = (mode) => {
+    switch(mode) {
+      case 'GENERAL': return 'General Knowledge';
+      case 'ABSTAIN': return 'Not Available';
+      case 'DOC-GROUNDED': return 'From Documentation';
+      default: return '';
+    }
+  };
+
   return (
     <div className={`message ${message.role}`}>
       <div className="message-bubble">
@@ -243,7 +270,57 @@ function Message({ message, getConfidenceIcon }) {
           <ReactMarkdown>{message.content}</ReactMarkdown>
         </div>
 
+        {message.role === 'assistant' && (
+          <>
+            {message.mode && message.mode !== 'DOC-GROUNDED' && (
+              <div className={`mode-badge ${message.mode.toLowerCase()}`}>
+                {getModeLabel(message.mode)}
+              </div>
+            )}
+            
+            {message.confidence && message.confidence !== 'error' && (
+              <div className="message-meta">
+                {getConfidenceIcon(message.confidence)}
+                <span className="confidence-label">
+                  {message.confidence} confidence
+                </span>
+                {message.chunks_used > 0 && (
+                  <span className="chunks-info">
+                    • {message.chunks_used} sources
+                  </span>
+                )}
+              </div>
+            )}
 
+            {message.citations && message.citations.length > 0 && (
+              <div className="citations-section">
+                <button 
+                  className="citations-toggle"
+                  onClick={() => setShowCitations(!showCitations)}
+                >
+                  <FileText size={14} />
+                  <span>View {message.citations.length} source(s)</span>
+                  {showCitations ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </button>
+                
+                {showCitations && (
+                  <div className="citations-list">
+                    {message.citations.map((cite, idx) => (
+                      <div key={idx} className="citation-item">
+                        <div className="citation-number">{cite.id}</div>
+                        <div className="citation-details">
+                          <div className="citation-title">{cite.title}</div>
+                          <div className="citation-path">{cite.section}</div>
+                          <div className="citation-file">{cite.file}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
 
         <div className="message-timestamp">
           {new Date(message.timestamp).toLocaleTimeString('en-US', {

@@ -6,36 +6,36 @@ paths:
 embeddings:
   model: "BAAI/bge-m3"
   dim: 1024
-  batch_size: 64
+  batch_size: 128
   device: "auto"
 
 chunking:
-  max_tokens: 900
+  max_tokens: 550
   overlap_tokens: 80
   prefer_structure: true
 
 retrieval:
-  k_vec: 50
-  k_fts: 50
+  k_vec: 25
+  k_fts: 25
   fusion: "rrf"
   weights:
-    semantic: 0.6
-    keyword: 0.4
+    semantic: 0.7
+    keyword: 0.3
 
 rerank:
   enabled: true
   model: "BAAI/bge-reranker-base"
-  top_n: 10
+  top_n: 8
 
 abstain:
   min_rerank_score: 0.25
   min_chunks: 2
 
 llm:
-  model: "deepseek-r1:7b"
+  model: "qwen2.5:7b"
   base_url: "http://localhost:11434"
-  temperature: 0.3
-  max_tokens: 1500
+  temperature: 0.2
+  max_tokens: 1100
 
 redaction:
   enabled: true
