@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
 import json
+import re
 
 class SQLiteDB:
     def __init__(self, db_path: str):
@@ -56,13 +57,59 @@ class SQLiteDB:
         return dict(row) if row else None
     
     def fts_search(self, query: str, limit: int = 50) -> List[Tuple[int, float]]:
+        """Full-text search with proper query sanitization"""
+        # Sanitize query for FTS5
+        sanitized_query = self._sanitize_fts_query(query)
+        
+        if not sanitized_query:
+            return []
+        
+        try:
+            cursor = self.conn.execute("""
+                SELECT rowid AS chunk_id, bm25(fts_chunks) AS score
+                FROM fts_chunks
+                WHERE fts_chunks MATCH ?
+                ORDER BY score
+                LIMIT ?
+            """, (sanitized_query, limit))
+            return [(row[0], row[1]) for row in cursor.fetchall()]
+        except sqlite3.OperationalError as e:
+            # If FTS5 query still fails, fall back to basic search
+            print(f"FTS5 query failed: {e}. Falling back to LIKE search.")
+            return self._fallback_search(query, limit)
+    
+    def _sanitize_fts_query(self, query: str) -> str:
+        """Sanitize query string for FTS5"""
+        # Remove special FTS5 characters that cause syntax errors
+        # Keep alphanumeric, spaces, and basic punctuation
+        query = re.sub(r'[^\w\s\-]', ' ', query)
+        
+        # Remove multiple spaces
+        query = re.sub(r'\s+', ' ', query)
+        
+        # Split into words and filter
+        words = [w.strip() for w in query.split() if len(w.strip()) > 1]
+        
+        if not words:
+            return ""
+        
+        # Join words with OR for better recall
+        return ' OR '.join(words)
+    
+    def _fallback_search(self, query: str, limit: int) -> List[Tuple[int, float]]:
+        """Fallback LIKE-based search when FTS5 fails"""
+        words = query.split()
+        if not words:
+            return []
+        
+        # Use LIKE for simple matching
+        like_pattern = f"%{words[0]}%"
         cursor = self.conn.execute("""
-            SELECT rowid AS chunk_id, bm25(fts_chunks) AS score
-            FROM fts_chunks
-            WHERE fts_chunks MATCH ?
-            ORDER BY score
+            SELECT chunk_id, 1.0 AS score
+            FROM chunks
+            WHERE text LIKE ?
             LIMIT ?
-        """, (query, limit))
+        """, (like_pattern, limit))
         return [(row[0], row[1]) for row in cursor.fetchall()]
     
     def get_chunk(self, chunk_id: int) -> Optional[Dict]:
