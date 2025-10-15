@@ -1,7 +1,7 @@
 import chromadb
 from chromadb.config import Settings
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Tuple
 import numpy as np
 
 class VectorStore:
@@ -15,13 +15,17 @@ class VectorStore:
         
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
-            metadata={"hnsw:space": "cosine"}
+            metadata={
+                "hnsw:space": "cosine",
+                "hnsw:M": 32,
+                "hnsw:construction_ef": 200,
+                "hnsw:search_ef": 256
+            }
         )
         print(f"✓ Vector store initialized at {chroma_dir}")
     
     def add_embeddings(self, chunk_ids: List[str], embeddings: np.ndarray, 
                        metadatas: List[Dict], texts: List[str]):
-        """Add embeddings to the collection"""
         self.collection.add(
             ids=chunk_ids,
             embeddings=embeddings.tolist(),
@@ -29,7 +33,7 @@ class VectorStore:
             documents=texts
         )
     
-    def search(self, query_embedding: np.ndarray, k: int = 50) -> tuple:
+    def search(self, query_embedding: np.ndarray, k: int = 50) -> Tuple[List[int], List[float]]:
         """
         Search for similar embeddings
         Returns: (chunk_ids, distances)
@@ -39,18 +43,21 @@ class VectorStore:
             n_results=k
         )
         
-        if not results['ids'] or not results['ids'][0]:
+        # FIXED: Proper empty check to avoid numpy boolean ambiguity
+        if not results or 'ids' not in results:
             return [], []
         
-        chunk_ids = [int(cid) for cid in results['ids'][0]]
-        distances = results['distances'][0]
+        ids_list = results.get('ids', [])
+        if not ids_list or len(ids_list) == 0 or len(ids_list[0]) == 0:
+            return [], []
+        
+        chunk_ids = [int(cid) for cid in ids_list[0]]
+        distances = results.get('distances', [[]])[0]
         
         return chunk_ids, distances
     
     def get_count(self) -> int:
-        """Get number of vectors in collection"""
         return self.collection.count()
     
     def delete_collection(self):
-        """Delete the collection"""
         self.client.delete_collection(self.collection.name)

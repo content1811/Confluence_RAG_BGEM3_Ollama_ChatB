@@ -1,47 +1,81 @@
 from typing import List, Dict
 
-SYSTEM_PROMPT = """You are a helpful assistant for internal documentation. Answer questions naturally and conversationally based on the provided context.
+SYSTEM_PROMPT = """You are a helpful AI assistant with access to company documentation. You have two modes:
 
-CRITICAL RULES:
-1. Answer directly and naturally - do NOT explain your reasoning process
-2. Do NOT mention "the documents", "the sources", or "the context provided"
-3. Do NOT say things like "Based on the provided information" or "Looking at the sources"
-4. Answer as if you naturally know this information
-5. Be concise and direct
-6. If you don't have enough information, simply say: "This information is not available in our documentation."
-7. Always cite sources at the end using [Source X] format naturally in your answer
+1) DOC-GROUNDED: When relevant documentation context is provided, answer based on it and cite sources.
+2) GENERAL: When no documentation is available, respond naturally using your general knowledge. Be helpful and conversational.
 
-Example of GOOD response:
-"RMI provides bare metal cloud services with high-performance servers featuring 128 vCPUs and 1024 GB RAM. These are ideal for compute-intensive workloads and offer cost savings through reserved instances."
+Rules:
+- When using documentation, cite sources with [Doc: filename/page]
+- When no documentation is available, respond naturally as a helpful assistant
+- Never claim you can't answer simple questions or greetings
+- Be conversational and friendly
+- For questions about company-specific information without documentation, say "I don't have that information in the documentation"
+"""
 
-Example of BAD response:
-"Looking at the provided documents, I can see that the sources mention RMI provides bare metal services. Based on source 1 and 2..."
-
-Remember: Answer naturally as if you're a knowledgeable colleague, not an AI analyzing documents."""
-
-def format_context(chunks: list) -> str:
-    """Format retrieved chunks into context string"""
-    context_parts = []
+def build_user_prompt(question: str, context: str, mode_hint: str, history: str = "") -> str:
+    """
+    Build a complete user prompt with question, context, mode, and history
     
+    Args:
+        question: User's question
+        context: Retrieved context (formatted chunks)
+        mode_hint: Mode hint (DOC-GROUNDED or GENERAL)
+        history: Formatted conversation history
+    
+    Returns:
+        Complete prompt string
+    """
+    prompt_parts = []
+    
+    if history:
+        prompt_parts.append(f"Previous conversation:\n{history}\n")
+    
+    prompt_parts.append(f"Question: {question}\n")
+    prompt_parts.append(f"Mode: {mode_hint}\n")
+    
+    if context:
+        prompt_parts.append(f"Documentation Context:\n{context}\n")
+    
+    if mode_hint == "DOC-GROUNDED":
+        prompt_parts.append("\nInstructions: Answer based on the documentation context. Cite sources.")
+    else:  # GENERAL
+        prompt_parts.append("\nInstructions: No documentation available. Respond naturally and helpfully as an AI assistant.")
+    
+    prompt_parts.append("\nAnswer:")
+    
+    return "\n".join(prompt_parts)
+
+def format_context(chunks: List[Dict]) -> str:
+    """
+    Format retrieved chunks into context string for LLM
+    
+    Args:
+        chunks: List of chunk dicts with 'text' and 'citation' keys
+    
+    Returns:
+        Formatted context string with source labels
+    """
+    context_parts = []
     for i, chunk in enumerate(chunks, 1):
         citation = chunk.get('citation', {})
         title = citation.get('title', 'Unknown')
-        section = chunk.get('section_path', 'Unknown')
         text = chunk.get('text', '')
-        
-        context_parts.append(
-            f"[Source {i}]\n"
-            f"Document: {title}\n"
-            f"Section: {section}\n"
-            f"Content: {text}\n"
-        )
+        context_parts.append(f"[Source {i} - {title}]\n{text}")
     
-    return "\n---\n".join(context_parts)
+    return "\n\n---\n\n".join(context_parts)
 
-def format_citations(chunks: list) -> list:
-    """Extract and format citations from chunks"""
-    citations = []
+def format_citations(chunks: List[Dict]) -> List[Dict]:
+    """
+    Extract and format citations from chunks for API response
     
+    Args:
+        chunks: List of chunk dicts with 'citation' and 'section_path' keys
+    
+    Returns:
+        List of citation dicts with id, title, section, and file
+    """
+    citations = []
     for i, chunk in enumerate(chunks, 1):
         citation = chunk.get('citation', {})
         citations.append({
